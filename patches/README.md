@@ -6,6 +6,7 @@
 
 - `series`：patch 施行顺序
 - `0001-ui-fallback-binds-to-configdump.patch`：UI 在 `/config` 无 `binds[]` 时（顶层 `llm:` 形）回落至 `/config_dump` + mapper，使 UI 可正确 render 高级 LLM 配置
+- `0002-ui-match-empty-namespace-backend-ref.patch`：route 之 backend 引用字符串当 namespace 为空时形如 `/name`，而 mapper 存名为 `name`；查找处兼容两种形，避免 UI 显「Unknown Backend」
 
 ## Rules
 

@@ -1,0 +1,24 @@
+diff --git a/ui/src/lib/configMapper.ts b/ui/src/lib/configMapper.ts
+index 43e24868..44b71260 100644
+--- a/ui/src/lib/configMapper.ts
++++ b/ui/src/lib/configMapper.ts
+@@ -253,9 +253,17 @@ function mapToBackend(backendData: any): Backend | undefined {
+ }
+ 
+ function mapToRouteBackend(rb: any, backends: Backend[]): Backend | undefined {
+-  // Route backend reference is a string in "namespace/name" format
++  // Route backend reference is a string in "namespace/name" format. When the
++  // backend has an empty namespace, the proxy emits "/name" (leading slash
++  // retained) while the various mapTo*Backend functions store just "name".
++  // Match either form to avoid falling through to the unknown-backend stub.
+   if (typeof rb.backend === "string") {
+-    const found = backends.find((b) => getBackendName(b) === rb.backend);
++    const ref = rb.backend;
++    const refNoPrefix = ref.startsWith("/") ? ref.slice(1) : ref;
++    const found = backends.find((b) => {
++      const name = getBackendName(b);
++      return name === ref || name === refNoPrefix;
++    });
+     if (found) return found;
+   }
+ 
