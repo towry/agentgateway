@@ -54,6 +54,10 @@ if [[ ! -d "$patches_dir" ]]; then
   exit 1
 fi
 
+# Absolutize so paths still resolve after we cd into the repo root.
+patches_dir="$(cd "$patches_dir" && pwd)"
+repo_root="$(cd "$repo_root" && pwd)"
+
 series_file="$patches_dir/series"
 if [[ ! -f "$series_file" ]]; then
   echo "Missing series file: $series_file" >&2
