@@ -1,0 +1,20 @@
+diff --git a/ui/src/lib/api.ts b/ui/src/lib/api.ts
+index cf90fd78..2a5b031c 100644
+--- a/ui/src/lib/api.ts
++++ b/ui/src/lib/api.ts
+@@ -52,7 +52,14 @@ export async function fetchConfig(): Promise<LocalConfig> {
+       }
+       throw new Error(`Failed to fetch config: ${r.status}`);
+     }
+-    return (await r.json()) as LocalConfig;
++    const json = (await r.json()) as any;
++    // High-level top-level forms (e.g. `llm:`) serialize without a `binds[]`
++    // array. The bind tree is materialized at runtime by translate_llm and
++    // only appears in /config_dump. Fall back so the UI can render it.
++    if (!Array.isArray(json?.binds)) {
++      return fetchViaDump();
++    }
++    return json as LocalConfig;
+   }
+ }
+ 
