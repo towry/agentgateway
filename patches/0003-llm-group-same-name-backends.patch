@@ -1,0 +1,261 @@
+diff --git a/crates/agentgateway/src/types/local.rs b/crates/agentgateway/src/types/local.rs
+index eed39154..40d650ec 100644
+--- a/crates/agentgateway/src/types/local.rs
++++ b/crates/agentgateway/src/types/local.rs
+@@ -2086,82 +2086,119 @@ json(request.body).model
+ 	};
+ 	routes.push(model_list_route);
+ 
+-	// Create routes and backends for each model
+-	for (idx, model_config) in models.iter().enumerate() {
+-		let model_name = strng::new(&model_config.name);
+-		// Index is needed because the same name can be used with different match criteria
+-		let backend_key = strng::format!("llm:model:{}:{idx}", model_config.name);
+-		let p = model_config.params.clone();
+-		let model = p.model;
+-
+-		// Use provider from config and set the model name
+-		let provider = match &model_config.provider {
+-			LocalModelAIProvider::Anthropic => AIProvider::Anthropic(anthropic::Provider { model }),
+-			LocalModelAIProvider::OpenAI => AIProvider::OpenAI(openai::Provider { model }),
+-			LocalModelAIProvider::Copilot => AIProvider::Copilot(copilot::Provider { model }),
+-			LocalModelAIProvider::Gemini => AIProvider::Gemini(crate::llm::gemini::Provider { model }),
+-			LocalModelAIProvider::Vertex => AIProvider::Vertex(crate::llm::vertex::Provider {
+-				model,
+-
+-				region: p.vertex_region,
+-				project_id: p.vertex_project.context("vertex requires vertex_project")?,
+-			}),
+-			LocalModelAIProvider::Bedrock => AIProvider::Bedrock(crate::llm::bedrock::Provider {
+-				model,
+-				region: p.aws_region.context("bedrock requires aws_region")?,
+-				guardrail_identifier: None,
+-				guardrail_version: None,
+-			}),
+-			LocalModelAIProvider::Azure => AIProvider::Azure(crate::llm::azure::Provider {
+-				model,
+-				resource_name: p
+-					.azure_resource_name
+-					.context("azure requires azureResourceName")?,
+-				resource_type: p
+-					.azure_resource_type
+-					.context("azure requires azureResourceType")?,
+-				api_version: p.azure_api_version,
+-				project_name: p.azure_project_name,
+-				cached_cred: Default::default(),
+-			}),
+-		};
+-
+-		// Create backend auth policy
+-		let mut pols = vec![];
+-		if let Some(key) = p.api_key.as_ref() {
+-			let backend_auth = BackendAuth::Key {
+-				value: key.0.clone(),
+-				location: None,
+-			};
+-			pols.push(BackendTrafficPolicy::BackendAuth(backend_auth));
++	// Group models by name preserving first-occurrence order. Entries sharing a
++	// name become endpoints under one AIBackend, giving random P2C load balance
++	// across them at request time. Single-entry groups behave exactly as before.
++	// Backend-level policies (defaults, overrides, transformation, headers, tls,
++	// tunnel, health, guardrails) and route matches are taken from the first
++	// entry in each group. Per-endpoint settings (api_key, host_override,
++	// path_override, path_prefix, tokenize, provider type) remain on each
++	// NamedAIProvider, so different upstreams under the same alias work.
++	let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
++	{
++		let mut name_to_group: HashMap<&str, usize> = HashMap::new();
++		for (idx, m) in models.iter().enumerate() {
++			if let Some(&g) = name_to_group.get(m.name.as_str()) {
++				groups[g].1.push(idx);
++			} else {
++				name_to_group.insert(m.name.as_str(), groups.len());
++				groups.push((m.name.clone(), vec![idx]));
++			}
+ 		}
++	}
+ 
+-		// Create AI backend
+-		let named_provider = NamedAIProvider {
+-			name: model_name.clone(),
+-			provider,
+-			host_override: p.host_override,
+-			path_override: p.path_override,
+-			path_prefix: p.path_prefix,
+-			tokenize: p.tokenize,
+-			inline_policies: pols,
+-		};
++	for (group_idx, (group_name, member_indices)) in groups.iter().enumerate() {
++		let model_name = strng::new(group_name);
++		// group_idx disambiguates backend key when same name appears with different
++		// match criteria across groups.
++		let backend_key = strng::format!("llm:model:{}:{group_idx}", group_name);
++		let multi = member_indices.len() > 1;
++
++		// Build one NamedAIProvider per group member. Each becomes a distinct
++		// endpoint in the AIBackend's EndpointSet. When the group has multiple
++		// members we suffix the endpoint key and provider name with `#i` so
++		// EndpointSet's IndexMap doesn't dedupe and metrics can distinguish
++		// which upstream served a given request.
++		let mut endpoints: Vec<(Strng, NamedAIProvider)> = Vec::with_capacity(member_indices.len());
++		for (pos, &mi) in member_indices.iter().enumerate() {
++			let model_config = &models[mi];
++			let p = model_config.params.clone();
++			let model = p.model;
++
++			let provider = match &model_config.provider {
++				LocalModelAIProvider::Anthropic => AIProvider::Anthropic(anthropic::Provider { model }),
++				LocalModelAIProvider::OpenAI => AIProvider::OpenAI(openai::Provider { model }),
++				LocalModelAIProvider::Copilot => AIProvider::Copilot(copilot::Provider { model }),
++				LocalModelAIProvider::Gemini => AIProvider::Gemini(crate::llm::gemini::Provider { model }),
++				LocalModelAIProvider::Vertex => AIProvider::Vertex(crate::llm::vertex::Provider {
++					model,
++
++					region: p.vertex_region,
++					project_id: p.vertex_project.context("vertex requires vertex_project")?,
++				}),
++				LocalModelAIProvider::Bedrock => AIProvider::Bedrock(crate::llm::bedrock::Provider {
++					model,
++					region: p.aws_region.context("bedrock requires aws_region")?,
++					guardrail_identifier: None,
++					guardrail_version: None,
++				}),
++				LocalModelAIProvider::Azure => AIProvider::Azure(crate::llm::azure::Provider {
++					model,
++					resource_name: p
++						.azure_resource_name
++						.context("azure requires azureResourceName")?,
++					resource_type: p
++						.azure_resource_type
++						.context("azure requires azureResourceType")?,
++					api_version: p.azure_api_version,
++					project_name: p.azure_project_name,
++					cached_cred: Default::default(),
++				}),
++			};
++
++			let mut endpoint_pols = vec![];
++			if let Some(key) = p.api_key.as_ref() {
++				let backend_auth = BackendAuth::Key {
++					value: key.0.clone(),
++					location: None,
++				};
++				endpoint_pols.push(BackendTrafficPolicy::BackendAuth(backend_auth));
++			}
++
++			let endpoint_name = if multi {
++				strng::format!("{group_name}#{pos}")
++			} else {
++				model_name.clone()
++			};
++
++			let named_provider = NamedAIProvider {
++				name: endpoint_name.clone(),
++				provider,
++				host_override: p.host_override,
++				path_override: p.path_override,
++				path_prefix: p.path_prefix,
++				tokenize: p.tokenize,
++				inline_policies: endpoint_pols,
++			};
++			endpoints.push((endpoint_name, named_provider));
++		}
+ 
+ 		let ai_backend = AIBackend {
+-			providers: crate::types::loadbalancer::EndpointSet::new(vec![vec![(
+-				model_name.clone(),
+-				named_provider,
+-			)]]),
++			providers: crate::types::loadbalancer::EndpointSet::new(vec![endpoints]),
+ 		};
+ 
++		// Backend-level policies are taken from the first entry in the group.
++		// Same-name entries are expected to share these; if they diverge the
++		// first wins and the rest are silently ignored.
++		let first_config = &models[member_indices[0]];
+ 		let mut pols = vec![];
+-		if let Some(p) = model_config.backend_tls.clone() {
++		if let Some(p) = first_config.backend_tls.clone() {
+ 			pols.push(BackendTrafficPolicy::BackendTLS(p.try_into()?));
+ 		}
+-		if let Some(p) = model_config.backend_tunnel.clone() {
++		if let Some(p) = first_config.backend_tunnel.clone() {
+ 			pols.push(BackendTrafficPolicy::Tunnel(p));
+ 		}
+-		if let Some(mut rh) = model_config.request_headers.clone() {
++		if let Some(mut rh) = first_config.request_headers.clone() {
+ 			rh.remove.push(strng::literal!("x-gateway-model-name"));
+ 			pols.push(BackendTrafficPolicy::RequestHeaderModifier(rh));
+ 		} else {
+@@ -2173,19 +2210,19 @@ json(request.body).model
+ 				},
+ 			));
+ 		}
+-		if let Some(rh) = model_config.response_headers.clone() {
++		if let Some(rh) = first_config.response_headers.clone() {
+ 			pols.push(BackendTrafficPolicy::ResponseHeaderModifier(Arc::new(rh)));
+ 		}
+-		if let Some(p) = model_config.health.clone() {
++		if let Some(p) = first_config.health.clone() {
+ 			pols.push(BackendTrafficPolicy::Health(p.try_into().map_err(
+ 				|e: crate::cel::Error| anyhow::anyhow!("health.unhealthyExpression: {}", e),
+ 			)?));
+ 		}
+ 		pols.push(BackendTrafficPolicy::AI(Arc::new(llm::Policy {
+-			defaults: model_config.defaults.clone(),
+-			overrides: model_config.overrides.clone(),
+-			transformations: model_config.transformation.clone(),
+-			prompt_guard: model_config.guardrails.clone(),
++			defaults: first_config.defaults.clone(),
++			overrides: first_config.overrides.clone(),
++			transformations: first_config.transformation.clone(),
++			prompt_guard: first_config.guardrails.clone(),
+ 			prompts: None,
+ 			model_aliases: Default::default(),
+ 			wildcard_patterns: Arc::new(vec![]),
+@@ -2198,14 +2235,13 @@ json(request.body).model
+ 		};
+ 		all_backends.push(backend_with_policies);
+ 
+-		// Create route for this model
+-		// Index is needed because the same name can be used with different match criteria
+-		// Important: index is before model, to ensure we rank ties by order of first-in-list
++		// Create route for this model group
++		// Important: group_idx is before model, to ensure we rank ties by order of first-in-list
+ 		// This ensures if I have '*' and 'foo/*', I can prefer `foo/*` by making it first.
+ 		// TODO: should we automatically make more explicit prefixes higher ranked?
+ 		// 999999 routes ought to be enough for anyone.
+-		let route_key = strng::format!("llm:model:{idx:06}:{}", model_config.name);
+-		let user_matches = if model_config.matches.is_empty() {
++		let route_key = strng::format!("llm:model:{group_idx:06}:{}", group_name);
++		let user_matches = if first_config.matches.is_empty() {
+ 			vec![RouteMatch {
+ 				path: PathMatch::PathPrefix(strng::new("/")),
+ 				method: None,
+@@ -2213,7 +2249,7 @@ json(request.body).model
+ 				query: vec![],
+ 			}]
+ 		} else {
+-			model_config
++			first_config
+ 				.matches
+ 				.iter()
+ 				.map(|m| RouteMatch {
+@@ -2229,7 +2265,7 @@ json(request.body).model
+ 			.map(|mut m| {
+ 				let header_match = HeaderMatch {
+ 					name: HeaderOrPseudo::Header(HeaderName::from_static("x-gateway-model-name")),
+-					value: llm_model_name_header_match(&model_config.name)?,
++					value: llm_model_name_header_match(group_name)?,
+ 				};
+ 				m.headers.push(header_match);
+ 				Ok(m)
+@@ -2240,7 +2276,7 @@ json(request.body).model
+ 			key: route_key.clone(),
+ 			service_key: None,
+ 			name: RouteName {
+-				name: strng::format!("model:{}", model_config.name),
++				name: strng::format!("model:{}", group_name),
+ 				namespace: strng::new("internal"),
+ 				rule_name: None,
+ 				kind: None,
