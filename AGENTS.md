@@ -65,3 +65,17 @@ git push origin deploy
 - 勿纳本地 agent 之记事、提示、未完之笔记于 `patches/`
 - 改 `main` 之私有改动若上游可纳，先开 PR 上游；上游合后此处 patch 删
 - Nix 构建（`nix/hm/agentgateway/`）经 `fetchFromGitHub` 拉 `towry/agentgateway` 之 main HEAD（或固定 commit），并 `applyPatches` 此处 `patches/` 之串
+
+## 隐私
+
+本仓 fork 为**公开**，`deploy` 分支与所有 patches、commit message、scripts、文档皆对外可见。提交前须脱敏，**禁止**纳入下列任一类信息（不限于此）：
+
+- 自有/内网之域名、子域、host 名、SSH 别名
+- 服务器 IP、端口映射、内网拓扑
+- 真用户名、邮箱、账号 ID（git author 字段除外）
+- API key、token、bearer、cookie、auth header 片段
+- 含上述任一之日志、错误堆栈、配置示例
+
+举例时用 RFC 文档保留之占位（如 `example.com`、`<host>`、`<token>`、`192.0.2.x`）；**禁止**写真名作反例——反例本身亦泄密。
+patch 由 `git diff` 生成时，先核所改源码不含上述任一类；若仅改 UI / 通用逻辑则天然安全，若涉部署配置须人工核之。
+commit / push 前以 `git diff --staged` 自查一遍。
