@@ -4,10 +4,13 @@
 
 ## 布局
 
-- `./` — 本目录 checkout 于 `deploy` 分支（patch-only），仅存 `AGENTS.md`、`patches/`、`scripts/`
+- `./` — 本目录 checkout 于 `deploy` 分支（patch-only），仅存 `AGENTS.md`、`patches/`、`scripts/`、`main-pin`、`.github/`
 - `./agentgateway-main/` — git worktree 跟 `main` 分支（gitignored）；改源码处
 - `./patches/` — 部署用之补丁文件 + `series`
 - `./scripts/apply.sh` — 通用 patch 施加脚本（与 `../litellm/scripts/apply.sh` 同款）
+- `./scripts/update-main-pin.sh` — 更新 `main-pin` 至当前 `origin/main` HEAD
+- `./main-pin` — 单行文本，存上游源码 commit SHA；CI 据此拉源码
+- `./.github/workflows/build-deploy.yml` — fork 内 CI：apply patches → build → release
 
 ## remotes
 
@@ -57,6 +60,31 @@ git push origin deploy
 ```
 
 `deploy` 分支独立演进，永不 merge 入 `main`。
+
+### 6. CI 产 release
+
+push 至 `deploy` 后，`.github/workflows/build-deploy.yml` 自跑（须于 GitHub 仓库设置中先启用 Actions）：
+
+1. 读 `main-pin` 取上游源码 commit
+2. checkout 源码 + apply `patches/series`
+3. Node 23 build UI、Rust 1.95 cargo build binary（含 `agentgateway/ui` feature）
+4. 发 release，artifact 名 `agentgateway-linux-amd64`，tag 形 `deploy-<date>-<src-short>-<deploy-short>`
+
+Nix 之 `binary-pin.nix` 即取此 release URL + sha256。
+
+### 7. 同步上游源码至新 commit
+
+```bash
+cd agentgateway-main
+git fetch upstream main
+git merge --ff-only upstream/main
+git push origin main
+cd ..
+./scripts/update-main-pin.sh
+git add main-pin
+git commit -m "chore: bump main-pin to <short>"
+git push origin deploy
+```
 
 ## 规约
 

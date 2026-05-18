@@ -1,0 +1,121 @@
+name: Build patched agentgateway
+
+on:
+  push:
+    branches: [deploy]
+    paths:
+      - 'main-pin'
+      - 'patches/**'
+      - 'scripts/apply.sh'
+      - '.github/workflows/build-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      main_ref:
+        description: 'Override main commit/ref (defaults to main-pin file)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout deploy branch
+        uses: actions/checkout@v4
+        with:
+          path: deploy
+
+      - name: Resolve main ref
+        id: pin
+        run: |
+          if [[ -n "${{ inputs.main_ref }}" ]]; then
+            REF="${{ inputs.main_ref }}"
+          else
+            REF=$(tr -d '[:space:]' < deploy/main-pin)
+          fi
+          if [[ -z "$REF" ]]; then
+            echo "::error::No main ref resolved (main-pin empty and no input)"
+            exit 1
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Using main ref: ${REF}"
+
+      - name: Checkout main source at pin
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pin.outputs.ref }}
+          path: src
+
+      - name: Resolve full main sha
+        id: src_sha
+        working-directory: src
+        run: |
+          SHA=$(git rev-parse HEAD)
+          SHORT=$(git rev-parse --short=12 HEAD)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply patches
+        run: deploy/scripts/apply.sh --repo-root src --patches-dir deploy/patches
+
+      - name: Setup Node 23
+        uses: actions/setup-node@v4
+        with:
+          node-version: '23.11.0'
+
+      - name: Build UI
+        working-directory: src/ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Build binary
+        working-directory: src
+        env:
+          VERSION: deploy-${{ steps.src_sha.outputs.short }}-${{ github.sha }}
+          GIT_REVISION: ${{ steps.src_sha.outputs.sha }}
+        run: cargo build --release --features agentgateway/ui --bin agentgateway
+
+      - name: Stage artifact
+        run: |
+          strip src/target/release/agentgateway
+          install -m 0755 src/target/release/agentgateway ./agentgateway-linux-amd64
+          ./agentgateway-linux-amd64 --version
+          sha256sum agentgateway-linux-amd64 | tee agentgateway-linux-amd64.sha256
+
+      - name: Compute release tag
+        id: tag
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          DEPLOY_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="deploy-${DATE}-${{ steps.src_sha.outputs.short }}-${DEPLOY_SHORT}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Patched agentgateway build (Linux x86_64).
+
+            * upstream source commit: `${{ steps.src_sha.outputs.sha }}`
+            * deploy branch commit: `${{ github.sha }}`
+            * patches applied: see `patches/series` in the deploy branch
+          files: |
+            agentgateway-linux-amd64
+            agentgateway-linux-amd64.sha256
