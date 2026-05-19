@@ -1,0 +1,120 @@
+diff --git a/crates/agentgateway/src/llm/conversion/completions.rs b/crates/agentgateway/src/llm/conversion/completions.rs
+index f3b9dc6c..739765e2 100644
+--- a/crates/agentgateway/src/llm/conversion/completions.rs
++++ b/crates/agentgateway/src/llm/conversion/completions.rs
+@@ -140,8 +140,33 @@ pub mod from_messages {
+ 	/// translate an Anthropic messages to an OpenAI completions request
+ 	pub fn translate(req: &types::messages::Request) -> Result<Vec<u8>, AIError> {
+ 		let typed = json::convert::<_, messages::Request>(req).map_err(AIError::RequestMarshal)?;
+-		let xlated = translate_internal(typed);
+-		serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
++		let (xlated, reasoning_per_assistant) = translate_internal(typed);
++		if reasoning_per_assistant.iter().all(Option::is_none) {
++			return serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal);
++		}
++		// Anthropic assistant turns can carry Thinking blocks; for OpenAI-compatible
++		// backends that gate multi-turn requests on `reasoning_content` (e.g. Kimi
++		// k2.6 coding), inject the field on the corresponding assistant messages.
++		// We post-serialize because async_openai's RequestAssistantMessage has no
++		// reasoning_content field; the upstream API will preserve unknown fields.
++		let mut value = serde_json::to_value(&xlated).map_err(AIError::RequestMarshal)?;
++		if let Some(messages) = value.get_mut("messages").and_then(|m| m.as_array_mut()) {
++			let mut assistant_idx = 0usize;
++			for msg in messages.iter_mut() {
++				if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
++					if let Some(reasoning) = reasoning_per_assistant.get(assistant_idx).cloned().flatten()
++						&& let Some(obj) = msg.as_object_mut()
++					{
++						obj.insert(
++							"reasoning_content".to_string(),
++							Value::String(reasoning),
++						);
++					}
++					assistant_idx += 1;
++				}
++			}
++		}
++		serde_json::to_vec(&value).map_err(AIError::RequestMarshal)
+ 	}
+ 
+ 	pub fn translate_response(bytes: &Bytes) -> Result<Box<dyn ResponseType>, AIError> {
+@@ -626,7 +651,9 @@ pub mod from_messages {
+ 	}
+ 
+ 	#[allow(deprecated)]
+-	fn translate_internal(req: messages::Request) -> completions::Request {
++	fn translate_internal(
++		req: messages::Request,
++	) -> (completions::Request, Vec<Option<String>>) {
+ 		let messages::Request {
+ 			messages,
+ 			system,
+@@ -675,6 +702,10 @@ pub mod from_messages {
+ 			});
+ 
+ 		let mut msgs: Vec<completions::RequestMessage> = Vec::new();
++		// Parallel to assistant messages pushed into `msgs`, in push order.
++		// Holds reasoning_content text per assistant turn (when Anthropic Thinking
++		// blocks were present); injected post-serialize in `translate`.
++		let mut reasoning_per_assistant: Vec<Option<String>> = Vec::new();
+ 
+ 		// Handle the system prompt (convert both string and block formats to string)
+ 		if let Some(system) = system {
+@@ -763,6 +794,7 @@ pub mod from_messages {
+ 				},
+ 				messages::Role::Assistant => {
+ 					let mut assistant_text = String::new();
++					let mut reasoning_text = String::new();
+ 					let mut tool_calls: Vec<completions::MessageToolCalls> = Vec::new();
+ 					for block in msg.content {
+ 						match block {
+@@ -785,11 +817,15 @@ pub mod from_messages {
+ 									},
+ 								));
+ 							},
+-							messages::ContentBlock::Thinking { .. } => {
+-								// TODO
++							messages::ContentBlock::Thinking { thinking, .. } => {
++								if !reasoning_text.is_empty() {
++									reasoning_text.push('\n');
++								}
++								reasoning_text.push_str(&thinking);
+ 							},
+ 							messages::ContentBlock::RedactedThinking { .. } => {
+-								// TODO
++								// Anthropic-encrypted blob; no portable representation on the
++								// OpenAI side. Dropped intentionally.
+ 							},
+ 							_ => {},
+ 						}
+@@ -815,6 +851,11 @@ pub mod from_messages {
+ 								function_call: None,
+ 							},
+ 						));
++						reasoning_per_assistant.push(if reasoning_text.is_empty() {
++							None
++						} else {
++							Some(reasoning_text)
++						});
+ 					}
+ 				},
+ 			}
+@@ -884,7 +925,7 @@ pub mod from_messages {
+ 			Some(completions::Stop::StringArray(stop_sequences))
+ 		};
+ 
+-		completions::Request {
++		let request = completions::Request {
+ 			model: Some(model),
+ 			messages: msgs,
+ 			stream: Some(stream),
+@@ -929,7 +970,8 @@ pub mod from_messages {
+ 			service_tier: None,
+ 			parallel_tool_calls,
+ 			web_search_options: None,
+-		}
++		};
++		(request, reasoning_per_assistant)
+ 	}
+ }
+ 

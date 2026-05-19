@@ -1,3 +1,4 @@
 0001-ui-fallback-binds-to-configdump.patch
 0002-ui-match-empty-namespace-backend-ref.patch
 0003-llm-group-same-name-backends.patch
+0004-llm-translate-thinking-to-reasoning-content.patch

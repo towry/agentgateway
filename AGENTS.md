@@ -2,6 +2,8 @@
 
 此目录持 `solo-io/agentgateway` 之私有补丁与部署辅助，模式仿 `../litellm/`。
 
+- 请主动 commit 修改，并请求用户同意，是否推送
+
 ## 布局
 
 - `./` — 本目录 checkout 于 `deploy` 分支（patch-only），仅存 `AGENTS.md`、`patches/`、`scripts/`、`main-pin`、`.github/`
